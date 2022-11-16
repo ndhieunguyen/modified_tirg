@@ -201,7 +201,7 @@ class CSSDataset(BaseDataset):
             img = self.transform(img)
         return img
 
-
+# ==============================================================================================================================================
 class Fashion200k(BaseDataset):
     """Fashion200k dataset."""
 
@@ -289,9 +289,6 @@ class Fashion200k(BaseDataset):
             }]
 
     def caption_index_init_(self):
-        """ index caption to generate training query-target example on the fly later"""
-
-        # index caption 2 caption_id and caption 2 image_ids
         caption2id = {}
         id2caption = {}
         caption2imgids = {}
@@ -370,9 +367,11 @@ class Fashion200k(BaseDataset):
         out['source_img_id'] = idx
         out['source_img_data'] = self.get_img(idx)
         out['source_caption'] = self.imgs[idx]['captions'][0]
+
         out['target_img_id'] = target_idx
         out['target_img_data'] = self.get_img(target_idx)
         out['target_caption'] = self.imgs[target_idx]['captions'][0]
+		
         out['mod'] = {'str': mod_str}
         return out
 
@@ -387,7 +386,7 @@ class Fashion200k(BaseDataset):
             img = self.transform(img)
         return img
 
-
+#================================================================================================================================================
 class MITStates(BaseDataset):
     """MITStates dataset."""
 

@@ -1,66 +1,91 @@
 import numpy as np
 import torch
-from tqdm import tqdm as tqdm
+from tqdm import tqdm
+import os
+from glob import glob
+from PIL import Image
+from img_text_composition_models import TIRG
+class ClothesRetrieval(torch.utils.data.Dataset):
 
+    def __init__(self, model:TIRG, dataset_path):
+        super().__init__()
 
-def retrieval_image(model, testset, number_of_output=3, batch_size=32):
-    test_queries = testset.get_test_queries()
+        print('Initiating...')
+        self.image_paths = []
+        self.image_captions = []
+        self.path2id = {}
+        self.model = model        
 
-    all_imgs = []
-    all_captions = []
-    all_queries = []
+        # ----------------------------------------------------------------------------------------------------------------------------
+        def caption_post_process(s):
+            return s.strip().replace('.',
+                                     'dotmark').replace('?', 'questionmark').replace(
+                                         '&', 'andmark').replace('*', 'starmark')
 
-    # compute test query features
-    imgs = []
-    mods = []
-    for t in tqdm(test_queries):
-        imgs += [testset.get_img(t['source_img_id'])]
-        mods += [t['mod']['str']]
-        if len(imgs) >= batch_size or t is test_queries[-1]:
-            if 'torch' not in str(type(imgs[0])):
-                imgs = [torch.from_numpy(d).float() for d in imgs]
-            imgs = torch.stack(imgs).float()
-            imgs = torch.autograd.Variable(imgs).cuda()
-            f = model.compose_img_text(imgs, mods).data.cpu().numpy()
-            all_queries += [f]
-            imgs = []
-            mods = []
-    all_queries = np.concatenate(all_queries)
+        label_folder = os.path.join(dataset_path, 'labels')
+        label_files = glob(label_folder + '*.txt')
+        label_files = [label_file for label_file in label_files if 'test' in label_file]
 
-    # compute all image features
-    imgs = []
-    all_processed_images = []
-    for i in tqdm(range(len(testset.imgs))):
-        imgs += [testset.get_img(i)]
-        all_processed_images += [testset.get_img(i)]
-        if len(imgs) >= batch_size or i == len(testset.imgs) - 1:
-            if 'torch' not in str(type(imgs[0])):
-                imgs = [torch.from_numpy(d).float() for d in imgs]
-            imgs = torch.stack(imgs).float()
-            imgs = torch.autograd.Variable(imgs).cuda()
-            imgs = model.extract_img_feature(imgs).data.cpu().numpy()
-            all_imgs += [imgs]
-            imgs = []
-    all_imgs = np.concatenate(all_imgs)
-    all_captions = [img['captions'][0] for img in testset.imgs]
-    all_processed_images = np.array(all_processed_images)
+        index = 0
+        images = []
+        for label_file in tqdm(label_files):
+            with open(label_file) as f:
+                lines = f.readlines()
+            for line in lines:
+                line = line.split('	')                
 
-    # feature normalization
-    for i in range(all_queries.shape[0]):
-        all_queries[i, :] /= np.linalg.norm(all_queries[i, :])
-    for i in range(all_imgs.shape[0]):
-        all_imgs[i, :] /= np.linalg.norm(all_imgs[i, :])
+                self.image_paths += line[0]
+                self.image_captions += [caption_post_process(line[2])]
+                images += [self._load_image(line[0])]
+                self.path2id[line[0]] = index
+                index += 1
 
-    # match test queries to target images, get nearest neighbors
-    nn_result = []
-    for i in tqdm(range(all_queries.shape[0])):
-        sims = all_queries[i:(i+1), :].dot(all_imgs.T)
-        sims[0, test_queries[i]['source_img_id']] = -10e10  # remove query image
+        images = [torch.from_numpy(image).float() for image in images]
+        images = torch.stack(images).float()
+        images = torch.autograd.Variable(images).cuda()
+        image_features = np.array(self.model.extract_img_feature(images).data.cpu().numpy())
+        for i in range(image_features.shape[0]):
+            image_features[i, :] /= np.linalg.norm(image_features[i, :])
+        self.image_features = image_features
 
-        nn_result.append(np.argsort(-sims[0, :])[:110])
+        print('===Finish===')
+        print(f' - Number of image infos: {len(self.image_infos)} \n - Number of image features: {len(self.image_features)}')
 
-    # compute recalls
-    nn_result = [[all_captions[nn] for nn in nns][:number_of_output] for nns in nn_result]
-    nn_image_result = [[all_processed_images[nn] for nn in nns][:number_of_output] for nns in nn_result]
+    def _load_image(self, path):
+            image = Image.open(path)
+            image = image.convert('RGB')
+            return image
 
-    return nn_result, nn_image_result
+    def retrieve_image(self, image_path, modify, number_of_outputs=3):
+        image = self._load_image(image_path)
+        images = [torch.from_numpy(image).float()]
+        images = torch.stack(images).float()
+        images = torch.autograd.Variable(images).cuda()
+
+        modifies = [modify]
+        queries = self.model.compose_img_text(images, modifies).data.cpu().numpy() # shape = (1, None)
+        queries /= np.linalg.norm(queries)
+        sims = np.squeeze(queries.dot(self.image_features.T))
+        index_results = np.argsort(-sims)[:110]
+        sorted_image_paths = [self.image_paths[index] for index in index_results][:number_of_outputs]
+
+        return sorted_image_paths
+
+    def retrieve_multi_images(self, image_path_list, modify_list, number_of_outputs=3):
+        images = [self._load_image(image_path) for image_path in image_path_list]
+        images = [torch.from_numpy(image).float() for image in images]
+        images = torch.stack(images).float()
+        images = torch.autograd.Variable(images).cuda()
+
+        queries = self.model.compose_img_text(images, modify_list).data.cpu().numpy()
+        for i in range(queries.shape[0]):
+            queries[i, :] /= np.linalg.norm(queries[i, :])
+
+        nn_result = []
+        for i in tqdm(range(queries.shape[0])):
+            sims = queries[i:(i+1), :].dot(self.image_features.T)
+            nn_result.append(np.argsort(-sims[0, :])[:110])
+
+        nn_result = [[self.image_paths[nn] for nn in nns] for nns in nn_result]
+
+        return nn_result
